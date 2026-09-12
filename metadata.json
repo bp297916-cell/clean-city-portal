@@ -1,0 +1,6 @@
+{
+  "name": "Clean City Portal",
+  "description": "Smart Citizen Complaint Management System for reporting, tracking, and resolving municipal and public infrastructure issues.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
