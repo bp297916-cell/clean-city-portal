@@ -14,7 +14,6 @@ import { db, auth } from '../firebase';
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
-  signInAnonymously,
   signInWithEmailAndPassword,
   signOut
 } from 'firebase/auth';
@@ -62,6 +61,8 @@ interface AppContextType {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
+const ADMIN_EMAIL = 'bp297916@gmail.com';
+
 const LOCAL_STORAGE_KEY_COMPLAINTS = 'clean_city_portal_complaints_v1';
 const LOCAL_STORAGE_KEY_USER = 'clean_city_portal_user_v1';
 const LOCAL_STORAGE_KEY_LANG = 'clean_city_portal_lang_v1';
@@ -85,32 +86,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return (saved === 'hi' || saved === 'gu' || saved === 'en') ? saved : 'en';
   });
 
-  // Current User (Defaults to citizen so app is fully previewable and ready immediately)
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    const saved = localStorage.getItem(LOCAL_STORAGE_KEY_USER);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return INITIAL_CITIZEN;
-      }
-    }
-    return INITIAL_CITIZEN;
-  });
+  // IMPORTANT: never restore a previous demo/user session from localStorage.
+  // Firebase Authentication is the source of truth for the signed-in user.
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
 
-  // Complaints state
-  const [complaints, setComplaints] = useState<Complaint[]>(() => {
-    const saved = localStorage.getItem(LOCAL_STORAGE_KEY_COMPLAINTS);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      } catch {
-        return INITIAL_COMPLAINTS;
-      }
-    }
-    return INITIAL_COMPLAINTS;
-  });
+  // Complaints come only from Firebase for the currently authenticated user.
+  const [complaints, setComplaints] = useState<Complaint[]>([]);
 
   const [currentView, setCurrentView] = useState<AppView>('home');
   const [activeTab, setActiveTab] = useState<CitizenDashboardTab>('overview');
@@ -123,29 +104,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [prefillData, setPrefillData] = useState<{ category?: string; title?: string } | null>(null);
   const [firebaseUser, setFirebaseUser] = useState(auth.currentUser);
 
-  // Sync complaints to local storage
+  // Firebase Authentication is the only source of truth.
+  // We intentionally DO NOT auto-login anonymously. A new visitor must register/login.
   useEffect(() => {
-    localStorage.setItem(LOCAL_STORAGE_KEY_COMPLAINTS, JSON.stringify(complaints));
-  }, [complaints]);
+    // Remove old demo data that may have been stored by previous versions.
+    localStorage.removeItem(LOCAL_STORAGE_KEY_COMPLAINTS);
+    localStorage.removeItem(LOCAL_STORAGE_KEY_USER);
 
-  // Keep a Firebase Authentication session so Firestore security rules can be enforced.
-  // Anonymous sign-in keeps the existing demo buttons working.
-  useEffect(() => {
-    const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
       setFirebaseUser(user);
 
       if (!user) {
-        try {
-          await signInAnonymously(auth);
-        } catch (error) {
-          console.error('Firebase authentication error:', error);
-          addToast(
-            'Authentication Required',
-            'Please enable Anonymous sign-in in Firebase Authentication, or use a registered account.',
-            'error'
-          );
-        }
+        setCurrentUser(null);
+        setComplaints([]);
+        setCurrentView('register');
+        setActiveTab('overview');
+        return;
       }
+
+      const email = (user.email || '').trim().toLowerCase();
+
+      if (email === ADMIN_EMAIL.toLowerCase()) {
+        const adminUser: User = {
+          ...INITIAL_ADMIN,
+          id: user.uid,
+          email: user.email || ADMIN_EMAIL,
+          role: 'admin'
+        };
+        setCurrentUser(adminUser);
+        setCurrentView('admin-dashboard');
+        return;
+      }
+
+      const citizenUser: User = {
+        ...INITIAL_CITIZEN,
+        id: user.uid,
+        email: user.email || '',
+        name: user.displayName || user.email?.split('@')[0] || 'Citizen',
+        role: 'citizen'
+      };
+      setCurrentUser(citizenUser);
+      setCurrentView('citizen-dashboard');
+      setActiveTab('overview');
     });
 
     return () => unsubscribeAuth();
@@ -188,9 +188,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           } as Complaint;
         });
 
-        if (firestoreComplaints.length > 0) {
-          setComplaints(firestoreComplaints);
-        }
+        // Citizens must only see complaints created by their own Firebase UID.
+        // Admin (the single configured admin email) can see all complaints.
+        const visibleComplaints =
+          firebaseUser.email?.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase()
+            ? firestoreComplaints
+            : firestoreComplaints.filter(
+                (complaint: any) => complaint.userId === firebaseUser.uid
+              );
+
+        setComplaints(visibleComplaints);
       },
       (error) => {
         console.error('Firestore listener error:', error);
@@ -200,13 +207,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => unsubscribe();
   }, [firebaseUser]);
 
-  useEffect(() => {
-    if (currentUser) {
-      localStorage.setItem(LOCAL_STORAGE_KEY_USER, JSON.stringify(currentUser));
-    } else {
-      localStorage.removeItem(LOCAL_STORAGE_KEY_USER);
-    }
-  }, [currentUser]);
+
 
   const setLanguage = (lang: Language) => {
     setLanguageState(lang);
@@ -232,30 +233,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const loginAsCitizen = () => {
-    signInAnonymously(auth)
-      .then(() => {
-        setCurrentUser(INITIAL_CITIZEN);
-        setCurrentView('citizen-dashboard');
-        setActiveTab('overview');
-        addToast('Login Successful', `Welcome back, ${INITIAL_CITIZEN.name}!`, 'success');
-      })
-      .catch((error) => {
-        console.error('Citizen demo login error:', error);
-        addToast('Login Failed', 'Please enable Anonymous sign-in in Firebase Authentication.', 'error');
-      });
+    addToast(
+      'Registration Required',
+      'Please create a citizen account or sign in with your Firebase account.',
+      'info'
+    );
+    setCurrentView('register');
   };
 
   const loginAsAdmin = () => {
-    signInAnonymously(auth)
-      .then(() => {
-        setCurrentUser(INITIAL_ADMIN);
-        setCurrentView('admin-dashboard');
-        addToast('Admin Portal Access', 'Logged in as Municipal Grievance Administrator.', 'info');
-      })
-      .catch((error) => {
-        console.error('Admin demo login error:', error);
-        addToast('Login Failed', 'Please enable Anonymous sign-in in Firebase Authentication.', 'error');
-      });
+    addToast(
+      'Admin Login Required',
+      `Only ${ADMIN_EMAIL} can access the Admin Panel.`,
+      'info'
+    );
+    setCurrentView('login');
   };
 
   const loginWithCredentials = (email: string, pass: string): boolean => {
@@ -266,7 +258,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     signInWithEmailAndPassword(auth, email.trim(), pass)
       .then((credential) => {
-        const isAdmin = email.toLowerCase().includes('admin');
+        const isAdmin = email.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase();
         const citizenUser: User = {
           ...INITIAL_CITIZEN,
           id: credential.user.uid,
@@ -304,6 +296,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const registerCitizen = async (data: { name: string; email: string; phone: string; password?: string }): Promise<boolean> => {
     if (!data.password) {
       addToast('Password Required', 'Please enter a password to create your Firebase account.', 'error');
+      return false;
+    }
+
+    if (data.email.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+      addToast(
+        'Admin Email Reserved',
+        'This email is reserved for the municipal administrator.',
+        'error'
+      );
       return false;
     }
 
@@ -369,6 +370,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const newComplaint: Complaint = {
       ...complaintData,
+      userId: firebaseUser?.uid || currentUser?.id || '',
       id: newId,
       createdAt: formattedDate,
       updatedAt: formattedDate,
@@ -554,7 +556,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const prefillComplaintForm = (category?: string, title?: string) => {
     setPrefillData({ category, title });
     if (!currentUser) {
-      setCurrentUser(INITIAL_CITIZEN);
+      setCurrentView('register');
+      return;
     }
     setCurrentView('citizen-dashboard');
     setActiveTab('new-complaint');
@@ -613,3 +616,4 @@ export const useApp = () => {
   }
   return context;
 };
+
