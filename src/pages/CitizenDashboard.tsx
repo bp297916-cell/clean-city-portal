@@ -109,35 +109,54 @@ export const CitizenDashboard: React.FC = () => {
     }
   }, [newDesc]);
 
-  // GPS Detection Handler
+  // GPS Detection Handler - uses the user's REAL current browser location.
+  // No simulated/fake coordinates are used.
   const handleDetectGPS = () => {
-    setIsDetectingGps(true);
-    if ('geolocation' in navigator) {
-      navigator.geolocation.getCurrentPosition(
-        pos => {
-          setIsDetectingGps(false);
-          setGpsCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-          setNewLocation(prev => prev || `Near GPS Lat: ${pos.coords.latitude.toFixed(4)}, Lng: ${pos.coords.longitude.toFixed(4)}`);
-          addToast('GPS Captured', `Accurate location coordinates detected: ${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`, 'success');
-        },
-        _err => {
-          // Fallback to municipal simulated coordinates for the ward
-          setTimeout(() => {
-            setIsDetectingGps(false);
-            const simulatedLat = 23.0225 + (Math.random() - 0.5) * 0.05;
-            const simulatedLng = 72.5714 + (Math.random() - 0.5) * 0.05;
-            setGpsCoords({ lat: simulatedLat, lng: simulatedLng });
-            setNewLocation(prev => prev || `Station Road intersection, GPS: ${simulatedLat.toFixed(4)}, ${simulatedLng.toFixed(4)}`);
-            addToast('GPS Coordinates Located', 'Captured precise municipal coordinates for your ward.', 'info');
-          }, 600);
-        },
-        { timeout: 5000 }
+    if (!('geolocation' in navigator)) {
+      addToast(
+        'Location Not Supported',
+        'Your browser does not support location detection. Please enter the complaint location manually.',
+        'error'
       );
-    } else {
-      setIsDetectingGps(false);
-      setGpsCoords({ lat: 23.0225, lng: 72.5714 });
-      addToast('GPS Set', 'Ward central coordinates applied.', 'info');
+      return;
     }
+
+    setIsDetectingGps(true);
+
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+
+        setIsDetectingGps(false);
+        setGpsCoords({ lat, lng });
+        setNewLocation(`Current Location (GPS): ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+
+        addToast(
+          'Current Location Detected',
+          `Your current GPS location was captured: ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+          'success'
+        );
+      },
+      error => {
+        setIsDetectingGps(false);
+        setGpsCoords(null);
+
+        let message = 'Unable to detect your current location. Please allow location permission and try again.';
+        if (error.code === error.PERMISSION_DENIED) {
+          message = 'Location permission was denied. Click the location icon in your browser address bar and allow location access.';
+        } else if (error.code === error.TIMEOUT) {
+          message = 'Location detection timed out. Please try again from a location with GPS/network access.';
+        }
+
+        addToast('Location Detection Failed', message, 'error');
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 0
+      }
+    );
   };
 
   // Sample photo choices so evaluators can easily test photo uploading without their own files
@@ -187,10 +206,7 @@ const handleSubmitComplaint = async (e: React.FormEvent) => {
       status: 'Submitted',
       location: newLocation.trim(),
       ward: newWard,
-      coordinates: gpsCoords ?? {
-        lat: 23.0225,
-        lng: 72.5714,
-      },
+      ...(gpsCoords ? { coordinates: gpsCoords } : {}),
       photoUrl:
         photoUrl?.trim() || samplePhotoPresets[0].url,
 
@@ -726,9 +742,12 @@ const handleSubmitComplaint = async (e: React.FormEvent) => {
                   className="text-xs font-bold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
                   <MapPin className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>{isDetectingGps ? 'Detecting...' : t('btnDetectGps')}</span>
+                  <span>{isDetectingGps ? 'Detecting Current Location...' : 'Use Current Location'}</span>
                 </button>
               </div>
+              <p className="text-[11px] text-slate-500">
+                Click <strong>Use Current Location</strong> to capture your device's real GPS location. Your browser may ask for permission.
+              </p>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <select
@@ -758,7 +777,7 @@ const handleSubmitComplaint = async (e: React.FormEvent) => {
                 <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-900 flex items-center justify-between">
                   <span className="flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                    <span>GPS Attached: {gpsCoords.lat.toFixed(5)}° N, {gpsCoords.lng.toFixed(5)}° E</span>
+                    <span>Current GPS Location Attached: {gpsCoords.lat.toFixed(6)}, {gpsCoords.lng.toFixed(6)}</span>
                   </span>
                   <button
                     type="button"
