@@ -1,5 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
+import { collection, doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { db, auth } from "../firebase";
+import { storage } from "../storage";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { getTranslation } from '../translations';
 import { 
   Complaint, 
@@ -79,8 +83,13 @@ export const CitizenDashboard: React.FC = () => {
   const [newWard, setNewWard] = useState(WARDS[3]);
   const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [isDetectingGps, setIsDetectingGps] = useState(false);
-  const [photoUrl, setPhotoUrl] = useState<string>('https://images.unsplash.com/photo-1605600659908-0ef719419d41?w=800&auto=format&fit=crop&q=80');
+  const [photoUrl, setPhotoUrl] = useState<string>('');
   const [additionalPhotoUrl, setAdditionalPhotoUrl] = useState<string>('');
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [additionalPhotoFile, setAdditionalPhotoFile] = useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<string>('');
+  const [additionalPhotoPreview, setAdditionalPhotoPreview] = useState<string>('');
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [aiAnalysisReason, setAiAnalysisReason] = useState<string>('');
 
@@ -147,43 +156,207 @@ export const CitizenDashboard: React.FC = () => {
     { label: 'Blocked Drain', url: 'https://images.unsplash.com/photo-1541888946425-d0fbb186f5f8?w=800&auto=format&fit=crop&q=80' }
   ];
 
-  // Submit Complaint Handler
-  const handleSubmitComplaint = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTitle.trim() || !newDesc.trim() || !newLocation.trim()) {
-      addToast('Missing Required Fields', 'Please provide a title, description, and location/ward.', 'error');
+  // Handle actual image file selection
+  const handlePhotoFileChange = (
+    file: File | null,
+    type: 'primary' | 'additional'
+  ) => {
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      addToast('Invalid Photo', 'Please select an image file.', 'error');
       return;
     }
 
-    setIsSubmitting(true);
-    setTimeout(() => {
-      setIsSubmitting(false);
-      const created = createComplaint({
-        title: newTitle.trim(),
-        description: newDesc.trim(),
-        category: newCategory,
-        priority: newPriority,
-        status: 'Submitted',
-        location: newLocation.trim(),
-        ward: newWard,
-        coordinates: gpsCoords || { lat: 23.0225, lng: 72.5714 },
-        photoUrl: photoUrl || samplePhotoPresets[0].url,
-        additionalPhotoUrl: additionalPhotoUrl || undefined
-      });
+    if (file.size > 5 * 1024 * 1024) {
+      addToast('Photo Too Large', 'Please select an image smaller than 5 MB.', 'error');
+      return;
+    }
 
-      // Clear form
-      setNewTitle('');
-      setNewDesc('');
-      setNewLocation('');
-      setGpsCoords(null);
-      setAiAnalysisReason('');
+    const previewUrl = URL.createObjectURL(file);
 
-      // Redirect user to Track Complaint as specified in requirements
-      setTrackSearchId(created.id);
-      setActiveTab('track');
-    }, 600);
+    if (type === 'primary') {
+      if (photoPreview) URL.revokeObjectURL(photoPreview);
+      setPhotoFile(file);
+      setPhotoPreview(previewUrl);
+      setPhotoUrl('');
+    } else {
+      if (additionalPhotoPreview) URL.revokeObjectURL(additionalPhotoPreview);
+      setAdditionalPhotoFile(file);
+      setAdditionalPhotoPreview(previewUrl);
+      setAdditionalPhotoUrl('');
+    }
   };
 
+  const clearPhoto = (type: 'primary' | 'additional') => {
+    if (type === 'primary') {
+      if (photoPreview) URL.revokeObjectURL(photoPreview);
+      setPhotoFile(null);
+      setPhotoPreview('');
+      setPhotoUrl('');
+    } else {
+      if (additionalPhotoPreview) URL.revokeObjectURL(additionalPhotoPreview);
+      setAdditionalPhotoFile(null);
+      setAdditionalPhotoPreview('');
+      setAdditionalPhotoUrl('');
+    }
+  };
+
+  const uploadComplaintPhoto = async (
+    file: File,
+    complaintId: string,
+    slot: 'primary' | 'additional'
+  ) => {
+    const firebaseUser = auth.currentUser;
+
+    if (!firebaseUser) {
+      throw new Error('AUTH_REQUIRED');
+    }
+
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const storagePath = `complaintPhotos/${firebaseUser.uid}/${complaintId}/${slot}-${Date.now()}-${safeName}`;
+    const storageRef = ref(storage, storagePath);
+
+    setIsUploadingPhoto(true);
+    try {
+      await uploadBytes(storageRef, file, {
+        contentType: file.type,
+        customMetadata: {
+          complaintId,
+          uploadedBy: firebaseUser.uid,
+        },
+      });
+
+      return await getDownloadURL(storageRef);
+    } finally {
+      setIsUploadingPhoto(false);
+    }
+  };
+
+  // Submit Complaint Handler
+const handleSubmitComplaint = async (e: React.FormEvent) => {
+  e.preventDefault();
+
+  // Validate required fields
+  if (!newTitle.trim() || !newDesc.trim() || !newLocation.trim()) {
+    addToast(
+      'Missing Required Fields',
+      'Please provide a title, description, and location/ward.',
+      'error'
+    );
+    return;
+  }
+
+  setIsSubmitting(true);
+
+  try {
+    if (!auth.currentUser) {
+      addToast(
+        'Login Required',
+        'Please sign in with your Firebase account before submitting a complaint.',
+        'error'
+      );
+      return;
+    }
+
+    if (!photoFile && !photoUrl.trim()) {
+      addToast(
+        'Photo Required',
+        'Please choose a complaint photo before submitting.',
+        'error'
+      );
+      return;
+    }
+
+    // Create the complaint ID first so uploaded photos are grouped under it.
+    const complaintRef = doc(collection(db, 'complaints'));
+    const complaintId = complaintRef.id;
+
+    let finalPhotoUrl = photoUrl.trim();
+    let finalAdditionalPhotoUrl = additionalPhotoUrl.trim();
+
+    // Upload selected photos to Firebase Storage.
+    if (photoFile) {
+      finalPhotoUrl = await uploadComplaintPhoto(
+        photoFile,
+        complaintId,
+        'primary'
+      );
+    }
+
+    if (additionalPhotoFile) {
+      finalAdditionalPhotoUrl = await uploadComplaintPhoto(
+        additionalPhotoFile,
+        complaintId,
+        'additional'
+      );
+    }
+
+    const complaintData = {
+      title: newTitle.trim(),
+      description: newDesc.trim(),
+      category: newCategory,
+      priority: newPriority,
+      status: 'Submitted',
+      location: newLocation.trim(),
+      ward: newWard,
+      coordinates: gpsCoords ?? {
+        lat: 23.0225,
+        lng: 72.5714,
+      },
+      photoUrl: finalPhotoUrl,
+      ...(finalAdditionalPhotoUrl
+        ? { additionalPhotoUrl: finalAdditionalPhotoUrl }
+        : {}),
+    };
+
+    // Save complaint metadata + uploaded image URLs to Firestore.
+    await setDoc(complaintRef, {
+      ...complaintData,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+
+    // Clear form
+    setNewTitle('');
+    setNewDesc('');
+    setNewLocation('');
+    setGpsCoords(null);
+    if (photoPreview) URL.revokeObjectURL(photoPreview);
+    if (additionalPhotoPreview) URL.revokeObjectURL(additionalPhotoPreview);
+    setPhotoFile(null);
+    setAdditionalPhotoFile(null);
+    setPhotoPreview('');
+    setAdditionalPhotoPreview('');
+    setPhotoUrl('');
+    setAdditionalPhotoUrl('');
+    setAiAnalysisReason('');
+
+    // Show success message
+    addToast(
+      'Complaint Registered Successfully',
+      `Your Complaint ID is ${complaintId}. Keep this ID for tracking.`,
+      'success'
+    );
+
+    // Open Track Complaint
+    setTrackSearchId(complaintId);
+    setTrackInput(complaintId);
+    setActiveTab('track');
+
+  } catch (error) {
+    console.error('Firestore complaint error:', error);
+
+    addToast(
+      'Submission Failed',
+      'Unable to save complaint to Firebase. Please check Firebase configuration and try again.',
+      'error'
+    );
+  } finally {
+    setIsSubmitting(false);
+  }
+};
   // Track Complaint Search
   const [trackInput, setTrackInput] = useState(trackSearchId || 'CC-90812');
   const [trackedComplaint, setTrackedComplaint] = useState<Complaint | null>(() => {
@@ -706,26 +879,135 @@ export const CitizenDashboard: React.FC = () => {
               )}
             </div>
 
-            {/* 7 & 8. Photo Evidence Upload with Preview & Presets */}
-            <div className="space-y-3">
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
-                7. {t('photoEvidence')} *
-              </label>
+            {/* 7 & 8. Real Firebase Storage Photo Evidence Upload */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  7. {t('photoEvidence')} *
+                </label>
+                <span className="text-[10px] font-semibold text-slate-500">
+                  JPG / PNG / WEBP • Max 5 MB
+                </span>
+              </div>
 
-              {/* Photo selector presets so evaluators have zero friction */}
-              <div className="text-[11px] text-slate-500">
-                <span>Select a sample evidence photo or enter custom URL:</span>
-                <div className="flex flex-wrap gap-1.5 mt-1.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <input
+                    id="complaint-form-photo-file"
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={e =>
+                      handlePhotoFileChange(
+                        e.target.files?.[0] || null,
+                        'primary'
+                      )
+                    }
+                  />
+
+                  <label
+                    htmlFor="complaint-form-photo-file"
+                    className="min-h-36 rounded-2xl border-2 border-dashed border-emerald-300 bg-emerald-50/50 hover:bg-emerald-50 flex flex-col items-center justify-center gap-2 text-emerald-800 cursor-pointer transition-colors p-4"
+                  >
+                    <Camera className="w-8 h-8" />
+                    <span className="text-xs font-bold">
+                      {photoFile ? 'Change Primary Photo' : 'Choose Primary Photo'}
+                    </span>
+                    <span className="text-[10px] text-slate-500 text-center">
+                      Take/select a photo showing the civic issue
+                    </span>
+                  </label>
+
+                  {(photoPreview || photoUrl) && (
+                    <div className="relative h-36 rounded-xl overflow-hidden border border-slate-200 bg-slate-100">
+                      <img
+                        src={photoPreview || photoUrl}
+                        alt="Primary evidence preview"
+                        className="w-full h-full object-cover"
+                      />
+                      <span className="absolute bottom-1 left-1 text-[10px] bg-slate-900/80 text-white px-2 py-0.5 rounded">
+                        {photoFile ? 'Ready to Upload' : 'Sample Evidence'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => clearPhoto('primary')}
+                        className="absolute top-1 right-1 bg-red-600 text-white p-1.5 rounded-full"
+                        title="Remove photo"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <label className="block text-[11px] font-semibold text-slate-600">
+                    8. {t('optionalPhoto')}
+                  </label>
+
+                  <input
+                    id="complaint-form-additional-photo-file"
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={e =>
+                      handlePhotoFileChange(
+                        e.target.files?.[0] || null,
+                        'additional'
+                      )
+                    }
+                  />
+
+                  <label
+                    htmlFor="complaint-form-additional-photo-file"
+                    className="min-h-36 rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50 hover:bg-slate-100 flex flex-col items-center justify-center gap-2 text-slate-600 cursor-pointer transition-colors p-4"
+                  >
+                    <UploadCloud className="w-8 h-8" />
+                    <span className="text-xs font-bold">
+                      {additionalPhotoFile ? 'Change Second Photo' : 'Add Second Photo'}
+                    </span>
+                    <span className="text-[10px] text-slate-500 text-center">
+                      Optional second angle / supporting evidence
+                    </span>
+                  </label>
+
+                  {additionalPhotoPreview && (
+                    <div className="relative h-36 rounded-xl overflow-hidden border border-slate-200 bg-slate-100">
+                      <img
+                        src={additionalPhotoPreview}
+                        alt="Secondary evidence preview"
+                        className="w-full h-full object-cover"
+                      />
+                      <span className="absolute bottom-1 left-1 text-[10px] bg-slate-900/80 text-white px-2 py-0.5 rounded">
+                        Ready to Upload
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => clearPhoto('additional')}
+                        className="absolute top-1 right-1 bg-red-600 text-white p-1.5 rounded-full"
+                        title="Remove second photo"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="pt-1">
+                <p className="text-[10px] text-slate-500 mb-1.5">
+                  Demo option: use a sample evidence image instead of a local file.
+                </p>
+                <div className="flex flex-wrap gap-1.5">
                   {samplePhotoPresets.map((preset, idx) => (
                     <button
                       key={idx}
                       type="button"
-                      onClick={() => setPhotoUrl(preset.url)}
-                      className={`px-2.5 py-1 rounded-md text-[11px] font-medium border transition-all cursor-pointer ${
-                        photoUrl === preset.url
-                          ? 'bg-emerald-700 text-white border-emerald-700 font-bold'
-                          : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-emerald-50'
-                      }`}
+                      onClick={() => {
+                        clearPhoto('primary');
+                        setPhotoUrl(preset.url);
+                      }}
+                      className="px-2.5 py-1 rounded-md text-[11px] font-medium border bg-slate-50 text-slate-700 border-slate-200 hover:bg-emerald-50 cursor-pointer"
                     >
                       {preset.label}
                     </button>
@@ -733,57 +1015,16 @@ export const CitizenDashboard: React.FC = () => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
-                <div>
-                  <input
-                    id="complaint-form-photo-url"
-                    type="url"
-                    value={photoUrl}
-                    onChange={e => setPhotoUrl(e.target.value)}
-                    placeholder="https://... photo URL"
-                    className="w-full text-xs p-2.5 rounded-xl border border-slate-300 focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 mb-2"
-                  />
-                  {photoUrl && (
-                    <div className="relative h-32 rounded-xl overflow-hidden border border-slate-200 bg-slate-100">
-                      <img src={photoUrl} alt="Primary preview" className="w-full h-full object-cover" />
-                      <span className="absolute bottom-1 right-1 text-[10px] bg-slate-900/80 text-white px-2 py-0.5 rounded">
-                        Primary Evidence
-                      </span>
-                    </div>
-                  )}
+              {isUploadingPhoto && (
+                <div className="flex items-center gap-2 p-3 rounded-xl bg-blue-50 border border-blue-200 text-blue-800 text-xs font-semibold">
+                  <UploadCloud className="w-4 h-4 animate-pulse" />
+                  Uploading photo to Firebase Storage...
                 </div>
+              )}
 
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                    8. {t('optionalPhoto')}
-                  </label>
-                  <input
-                    id="complaint-form-additional-photo"
-                    type="url"
-                    value={additionalPhotoUrl}
-                    onChange={e => setAdditionalPhotoUrl(e.target.value)}
-                    placeholder="Optional 2nd angle image URL"
-                    className="w-full text-xs p-2.5 rounded-xl border border-slate-300 focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 mb-2"
-                  />
-                  {additionalPhotoUrl ? (
-                    <div className="relative h-32 rounded-xl overflow-hidden border border-slate-200 bg-slate-100">
-                      <img src={additionalPhotoUrl} alt="Secondary preview" className="w-full h-full object-cover" />
-                      <button
-                        type="button"
-                        onClick={() => setAdditionalPhotoUrl('')}
-                        className="absolute top-1 right-1 bg-red-600 text-white p-1 rounded-full"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="h-32 rounded-xl border border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 text-xs">
-                      <UploadCloud className="w-6 h-6 mb-1 opacity-50" />
-                      <span>Optional secondary photo</span>
-                    </div>
-                  )}
-                </div>
-              </div>
+              <p className="text-[10px] text-slate-400">
+                Selected photos are uploaded to Firebase Storage and their download URLs are saved with the complaint.
+              </p>
             </div>
 
             {/* Submit Button */}
@@ -794,7 +1035,7 @@ export const CitizenDashboard: React.FC = () => {
               <button
                 id="submit-new-complaint-btn"
                 type="submit"
-                disabled={isSubmitting}
+                disabled={isSubmitting || isUploadingPhoto}
                 className="px-6 py-3.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white font-bold text-xs sm:text-sm rounded-xl shadow-md shadow-emerald-700/20 transition-all flex items-center gap-2 cursor-pointer"
               >
                 <span>{isSubmitting ? t('submitting') : t('btnSubmitComplaint')}</span>

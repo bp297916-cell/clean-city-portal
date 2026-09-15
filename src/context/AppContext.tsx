@@ -9,6 +9,15 @@ import {
   ComplaintStatus 
 } from '../types';
 import { INITIAL_CITIZEN, INITIAL_ADMIN, INITIAL_COMPLAINTS } from '../data/mockData';
+import { collection, doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { db, auth } from '../firebase';
+import {
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  signInAnonymously,
+  signInWithEmailAndPassword,
+  signOut
+} from 'firebase/auth';
 
 interface AppContextType {
   currentUser: User | null;
@@ -31,10 +40,10 @@ interface AppContextType {
   loginAsCitizen: () => void;
   loginAsAdmin: () => void;
   loginWithCredentials: (email: string, pass: string) => boolean;
-  registerCitizen: (data: { name: string; email: string; phone: string; password?: string }) => boolean;
+  registerCitizen: (data: { name: string; email: string; phone: string; password?: string }) => Promise<boolean>;
   logout: () => void;
   updateUserProfile: (data: Partial<User>) => void;
-  createComplaint: (complaintData: Omit<Complaint, 'id' | 'createdAt' | 'updatedAt' | 'timeline' | 'citizenName' | 'citizenEmail' | 'citizenPhone'>) => Complaint;
+  createComplaint: (complaintData: Omit<Complaint, 'id' | 'createdAt' | 'updatedAt' | 'timeline' | 'citizenName' | 'citizenEmail' | 'citizenPhone'>) => Complaint;  
   updateComplaintStatus: (id: string, status: ComplaintStatus, remarks?: string) => void;
   assignComplaint: (id: string, officerName: string, remarks?: string) => void;
   resolveComplaint: (id: string, remarks?: string) => void;
@@ -56,6 +65,18 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 const LOCAL_STORAGE_KEY_COMPLAINTS = 'clean_city_portal_complaints_v1';
 const LOCAL_STORAGE_KEY_USER = 'clean_city_portal_user_v1';
 const LOCAL_STORAGE_KEY_LANG = 'clean_city_portal_lang_v1';
+
+const removeUndefined = (value: any): any => {
+  if (Array.isArray(value)) return value.map(removeUndefined);
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => [k, removeUndefined(v)])
+    );
+  }
+  return value;
+};
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Load stored language or default to en
@@ -100,11 +121,84 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isAiChatOpen, setIsAiChatOpen] = useState<boolean>(false);
   const [trackSearchId, setTrackSearchId] = useState<string>('');
   const [prefillData, setPrefillData] = useState<{ category?: string; title?: string } | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState(auth.currentUser);
 
-  // Sync to local storage
+  // Sync complaints to local storage
   useEffect(() => {
     localStorage.setItem(LOCAL_STORAGE_KEY_COMPLAINTS, JSON.stringify(complaints));
   }, [complaints]);
+
+  // Keep a Firebase Authentication session so Firestore security rules can be enforced.
+  // Anonymous sign-in keeps the existing demo buttons working.
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
+      setFirebaseUser(user);
+
+      if (!user) {
+        try {
+          await signInAnonymously(auth);
+        } catch (error) {
+          console.error('Firebase authentication error:', error);
+          addToast(
+            'Authentication Required',
+            'Please enable Anonymous sign-in in Firebase Authentication, or use a registered account.',
+            'error'
+          );
+        }
+      }
+    });
+
+    return () => unsubscribeAuth();
+  }, []);
+
+  // Sync complaints with Firebase Firestore in real time
+  useEffect(() => {
+    if (!firebaseUser) return;
+
+    const complaintsRef = collection(db, 'complaints');
+
+    const formatFirestoreDate = (value: any): string => {
+      if (!value) return '';
+      if (typeof value === 'string') return value;
+      if (value?.toDate && typeof value.toDate === 'function') {
+        const date = value.toDate();
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+      }
+      return String(value);
+    };
+
+    const unsubscribe = onSnapshot(
+      complaintsRef,
+      (snapshot) => {
+        const firestoreComplaints = snapshot.docs.map((item) => {
+          const data = item.data();
+          const timeline = Array.isArray(data.timeline)
+            ? data.timeline.map((entry: any) => ({
+                ...entry,
+                timestamp: formatFirestoreDate(entry.timestamp),
+              }))
+            : [];
+
+          return {
+            ...data,
+            id: item.id,
+            createdAt: formatFirestoreDate(data.createdAt),
+            updatedAt: formatFirestoreDate(data.updatedAt),
+            timeline,
+          } as Complaint;
+        });
+
+        if (firestoreComplaints.length > 0) {
+          setComplaints(firestoreComplaints);
+        }
+      },
+      (error) => {
+        console.error('Firestore listener error:', error);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [firebaseUser]);
 
   useEffect(() => {
     if (currentUser) {
@@ -138,56 +232,121 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const loginAsCitizen = () => {
-    setCurrentUser(INITIAL_CITIZEN);
-    setCurrentView('citizen-dashboard');
-    setActiveTab('overview');
-    addToast('Login Successful', `Welcome back, ${INITIAL_CITIZEN.name}!`, 'success');
+    signInAnonymously(auth)
+      .then(() => {
+        setCurrentUser(INITIAL_CITIZEN);
+        setCurrentView('citizen-dashboard');
+        setActiveTab('overview');
+        addToast('Login Successful', `Welcome back, ${INITIAL_CITIZEN.name}!`, 'success');
+      })
+      .catch((error) => {
+        console.error('Citizen demo login error:', error);
+        addToast('Login Failed', 'Please enable Anonymous sign-in in Firebase Authentication.', 'error');
+      });
   };
 
   const loginAsAdmin = () => {
-    setCurrentUser(INITIAL_ADMIN);
-    setCurrentView('admin-dashboard');
-    addToast('Admin Portal Access', 'Logged in as Municipal Grievance Administrator.', 'info');
+    signInAnonymously(auth)
+      .then(() => {
+        setCurrentUser(INITIAL_ADMIN);
+        setCurrentView('admin-dashboard');
+        addToast('Admin Portal Access', 'Logged in as Municipal Grievance Administrator.', 'info');
+      })
+      .catch((error) => {
+        console.error('Admin demo login error:', error);
+        addToast('Login Failed', 'Please enable Anonymous sign-in in Firebase Authentication.', 'error');
+      });
   };
 
-  const loginWithCredentials = (email: string, _pass: string): boolean => {
-    if (email.toLowerCase().includes('admin')) {
-      loginAsAdmin();
-      return true;
+  const loginWithCredentials = (email: string, pass: string): boolean => {
+    if (!email.trim() || !pass) {
+      addToast('Login Failed', 'Please enter your email and password.', 'error');
+      return false;
     }
-    const citizenUser: User = {
-      ...INITIAL_CITIZEN,
-      email: email,
-      name: email.split('@')[0].replace('.', ' ').replace(/\b\w/g, l => l.toUpperCase())
-    };
-    setCurrentUser(citizenUser);
-    setCurrentView('citizen-dashboard');
-    setActiveTab('overview');
-    addToast('Welcome to Clean City Portal', `Logged in successfully as ${citizenUser.name}`, 'success');
+
+    signInWithEmailAndPassword(auth, email.trim(), pass)
+      .then((credential) => {
+        const isAdmin = email.toLowerCase().includes('admin');
+        const citizenUser: User = {
+          ...INITIAL_CITIZEN,
+          id: credential.user.uid,
+          email: credential.user.email || email,
+          name: email.split('@')[0].replace('.', ' ').replace(/\b\w/g, l => l.toUpperCase())
+        };
+
+        if (isAdmin) {
+          setCurrentUser({ ...INITIAL_ADMIN, id: credential.user.uid, email: credential.user.email || email });
+          setCurrentView('admin-dashboard');
+          addToast('Admin Login Successful', 'Authenticated with Firebase.', 'success');
+        } else {
+          setCurrentUser(citizenUser);
+          setCurrentView('citizen-dashboard');
+          setActiveTab('overview');
+          addToast('Login Successful', `Welcome back, ${citizenUser.name}!`, 'success');
+        }
+      })
+      .catch((error: any) => {
+        console.error('Firebase login error:', error);
+        let message = 'Invalid email or password.';
+        if (error?.code === 'auth/user-not-found' || error?.code === 'auth/invalid-credential') {
+          message = 'No account found with these credentials.';
+        } else if (error?.code === 'auth/wrong-password') {
+          message = 'Incorrect password.';
+        } else if (error?.code === 'auth/invalid-email') {
+          message = 'Please enter a valid email address.';
+        }
+        addToast('Login Failed', message, 'error');
+      });
+
     return true;
   };
 
-  const registerCitizen = (data: { name: string; email: string; phone: string }): boolean => {
-    const newUser: User = {
-      id: 'usr-' + Date.now(),
-      name: data.name,
-      email: data.email,
-      phone: data.phone,
-      address: 'Ward 4 - Central Zone',
-      ward: 'Ward 4 - Central Zone & Market Square',
-      role: 'citizen',
-      avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200&auto=format&fit=crop&q=80',
-      language: language,
-      notifications: { email: true, sms: true, push: true }
-    };
-    setCurrentUser(newUser);
-    setCurrentView('citizen-dashboard');
-    setActiveTab('overview');
-    addToast('Account Created Successfully', `Welcome to Clean City Portal, ${newUser.name}!`, 'success');
-    return true;
+  const registerCitizen = async (data: { name: string; email: string; phone: string; password?: string }): Promise<boolean> => {
+    if (!data.password) {
+      addToast('Password Required', 'Please enter a password to create your Firebase account.', 'error');
+      return false;
+    }
+
+    try {
+      const credential = await createUserWithEmailAndPassword(auth, data.email.trim(), data.password);
+
+      const newUser: User = {
+        id: credential.user.uid,
+        name: data.name,
+        email: credential.user.email || data.email,
+        phone: data.phone,
+        address: 'Ward 4 - Central Zone',
+        ward: 'Ward 4 - Central Zone & Market Square',
+        role: 'citizen',
+        avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200&auto=format&fit=crop&q=80',
+        language: language,
+        notifications: { email: true, sms: true, push: true }
+      };
+
+      setCurrentUser(newUser);
+      setCurrentView('citizen-dashboard');
+      setActiveTab('overview');
+      addToast('Account Created Successfully', `Welcome to Clean City Portal, ${newUser.name}!`, 'success');
+      return true;
+    } catch (error: any) {
+      console.error('Firebase registration error:', error);
+
+      let message = 'Unable to create your account. Please try again.';
+      if (error?.code === 'auth/email-already-in-use') {
+        message = 'This email is already registered. Please sign in instead.';
+      } else if (error?.code === 'auth/invalid-email') {
+        message = 'Please enter a valid email address.';
+      } else if (error?.code === 'auth/weak-password') {
+        message = 'Password is too weak. Please use a stronger password.';
+      }
+
+      addToast('Registration Failed', message, 'error');
+      return false;
+    }
   };
 
   const logout = () => {
+    signOut(auth).catch((error) => console.error('Firebase logout error:', error));
     setCurrentUser(null);
     setCurrentView('home');
     addToast('Logged Out', 'You have been safely signed out from the portal.', 'info');
@@ -228,6 +387,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setComplaints(prev => [newComplaint, ...prev]);
+
+    // Save complaint to Firestore
+    setDoc(doc(db, 'complaints', newId), removeUndefined(newComplaint))
+      .catch((error) => {
+        console.error('Firestore save error:', error);
+        addToast(
+          'Cloud Save Failed',
+          'Complaint was saved locally, but could not be saved to Firebase.',
+          'error'
+        );
+      });
+    
     addToast(
       'Complaint Registered Successfully!', 
       `Your Complaint ID is ${newId}. Keep this ID for tracking.`, 
@@ -237,14 +408,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return newComplaint;
   };
 
-  const updateComplaintStatus = (id: string, status: ComplaintStatus, remarks?: string) => {
+     const updateComplaintStatus = (id: string, status: ComplaintStatus, remarks?: string) => {
     const now = new Date();
     const formattedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+
+    let updatedComplaint: Complaint | null = null;
 
     setComplaints(prev => prev.map(c => {
       if (c.id === id) {
         const updatedTimeline = [
-          ...c.timeline,
+          ...(Array.isArray(c.timeline) ? c.timeline : []),
           {
             status,
             timestamp: formattedDate,
@@ -252,18 +425,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             actor: currentUser?.role === 'admin' ? currentUser.name : 'Municipal Authority'
           }
         ];
-        return {
+
+        updatedComplaint = {
           ...c,
           status,
           updatedAt: formattedDate,
           officerRemarks: remarks || c.officerRemarks,
           timeline: updatedTimeline
         };
+
+        return updatedComplaint;
       }
+
       return c;
     }));
 
+    // Save updated complaint to Firestore
+    if (updatedComplaint) {
+      setDoc(doc(db, 'complaints', id), removeUndefined(updatedComplaint))
+        .catch((error) => {
+          console.error('Firestore status update error:', error);
+          addToast(
+            'Cloud Update Failed',
+            'Status was updated locally, but could not be saved to Firebase.',
+            'error'
+          );
+        });
+    }
+
     addToast('Complaint Status Updated', `Complaint ${id} status updated to "${status}".`, 'info');
+
     if (selectedComplaint && selectedComplaint.id === id) {
       setSelectedComplaint(prev => prev ? {
         ...prev,
@@ -278,11 +469,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const now = new Date();
     const formattedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 
+    let updatedComplaint: Complaint | null = null;
+
     setComplaints(prev => prev.map(c => {
       if (c.id === id) {
         const nextStatus: ComplaintStatus = c.status === 'Submitted' ? 'Assigned' : c.status;
         const updatedTimeline = [
-          ...c.timeline,
+          ...(Array.isArray(c.timeline) ? c.timeline : []),
           {
             status: nextStatus,
             timestamp: formattedDate,
@@ -290,7 +483,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             actor: currentUser?.name || 'Administrator'
           }
         ];
-        return {
+
+        updatedComplaint = {
           ...c,
           assignedOfficer: officerName,
           status: nextStatus,
@@ -298,9 +492,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           officerRemarks: remarks || c.officerRemarks,
           timeline: updatedTimeline
         };
+
+        return updatedComplaint;
       }
+
       return c;
     }));
+
+    // Save assigned complaint to Firestore
+    if (updatedComplaint) {
+      setDoc(doc(db, 'complaints', id), removeUndefined(updatedComplaint))
+        .catch((error) => {
+          console.error('Firestore assignment error:', error);
+          addToast(
+            'Cloud Update Failed',
+            'Officer assignment was updated locally, but could not be saved to Firebase.',
+            'error'
+          );
+        });
+    }
 
     addToast('Officer Assigned', `Complaint ${id} has been assigned to ${officerName}.`, 'success');
   };

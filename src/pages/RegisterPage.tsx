@@ -49,7 +49,7 @@ export const RegisterPage: React.FC = () => {
     return Object.keys(errs).length === 0;
   };
 
-  const handleRegister = (e: React.FormEvent) => {
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!validate()) {
       addToast('Invalid Form Submission', 'Please correct the highlighted errors in the form.', 'error');
@@ -57,14 +57,16 @@ export const RegisterPage: React.FC = () => {
     }
 
     setIsLoading(true);
-    setTimeout(() => {
-      setIsLoading(false);
-      registerCitizen({
+    try {
+      await registerCitizen({
         name: formData.fullName.trim(),
         email: formData.email.trim(),
-        phone: formData.phone.trim()
+        phone: formData.phone.trim(),
+        password: formData.password
       });
-    }, 500);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleQuickFill = () => {
