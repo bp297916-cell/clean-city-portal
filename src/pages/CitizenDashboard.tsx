@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
-import { collection, doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, doc, setDoc, serverTimestamp, onSnapshot, query, where, updateDoc } from 'firebase/firestore';
 import { db } from "../firebase";
 import { getTranslation } from '../translations';
 import { 
@@ -63,6 +63,67 @@ export const CitizenDashboard: React.FC = () => {
     logout,
     addToast
   } = useApp();
+
+  // Live citizen notifications from Firestore
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+
+  useEffect(() => {
+    if (!currentUser?.id) {
+      setNotifications([]);
+      return;
+    }
+
+    const notificationsQuery = query(
+      collection(db, 'notifications'),
+      where('userId', '==', currentUser.id)
+    );
+
+    const unsubscribe = onSnapshot(
+      notificationsQuery,
+      snapshot => {
+        const items = snapshot.docs.map(notificationDoc => ({
+          id: notificationDoc.id,
+          ...notificationDoc.data()
+        }));
+
+        items.sort((a: any, b: any) => {
+          const aTime = a.createdAt?.toMillis?.() || 0;
+          const bTime = b.createdAt?.toMillis?.() || 0;
+          return bTime - aTime;
+        });
+
+        setNotifications(items);
+      },
+      error => {
+        console.error('Notification listener error:', error);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [currentUser?.id]);
+
+  const unreadNotifications = notifications.filter(n => !n.read).length;
+
+  const markNotificationRead = async (notificationId: string) => {
+    try {
+      await updateDoc(doc(db, 'notifications', notificationId), { read: true });
+    } catch (error) {
+      console.error('Unable to mark notification as read:', error);
+    }
+  };
+
+  const formatNotificationTime = (createdAt: any) => {
+    const date = createdAt?.toDate?.();
+    if (!date) return 'Just now';
+
+    return date.toLocaleString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
 
   const t = (key: any) => getTranslation(language, key);
 
@@ -381,6 +442,103 @@ const handleSubmitComplaint = async (e: React.FormEvent) => {
             <PlusCircle className="w-4 h-4 text-emerald-200" />
             <span>+ New Complaint</span>
           </button>
+        </div>
+
+        {/* Notifications Button */}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setShowNotifications(prev => !prev)}
+            className="relative w-12 h-12 rounded-xl bg-slate-100 hover:bg-emerald-50 border border-slate-200 hover:border-emerald-200 text-slate-700 hover:text-emerald-700 flex items-center justify-center transition-colors"
+            title="Notifications"
+          >
+            <BellRing className="w-5 h-5" />
+            {unreadNotifications > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[20px] h-5 px-1 rounded-full bg-red-600 text-white text-[10px] font-bold flex items-center justify-center border-2 border-white">
+                {unreadNotifications > 9 ? '9+' : unreadNotifications}
+              </span>
+            )}
+          </button>
+
+          {showNotifications && (
+            <div className="absolute right-0 top-14 z-50 w-[340px] max-w-[calc(100vw-2rem)] bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Notifications</h3>
+                  <p className="text-[10px] text-slate-500">
+                    {unreadNotifications} unread notification{unreadNotifications === 1 ? '' : 's'}
+                  </p>
+                </div>
+                {notifications.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await Promise.all(
+                        notifications
+                          .filter(n => !n.read)
+                          .map(n => markNotificationRead(n.id))
+                      );
+                    }}
+                    className="text-[10px] font-bold text-emerald-700 hover:underline"
+                  >
+                    Mark all read
+                  </button>
+                )}
+              </div>
+
+              <div className="max-h-80 overflow-y-auto">
+                {notifications.length === 0 ? (
+                  <div className="p-8 text-center text-slate-400">
+                    <BellRing className="w-7 h-7 mx-auto mb-2 opacity-40" />
+                    <p className="text-xs font-medium">No notifications yet.</p>
+                    <p className="text-[10px] mt-1">Updates about your complaints will appear here.</p>
+                  </div>
+                ) : (
+                  notifications.map((notification: any) => (
+                    <button
+                      key={notification.id}
+                      type="button"
+                      onClick={() => markNotificationRead(notification.id)}
+                      className={`w-full text-left px-4 py-3 border-b border-slate-100 hover:bg-slate-50 transition-colors ${
+                        notification.read ? 'bg-white' : 'bg-emerald-50/60'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className={`mt-0.5 w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
+                          notification.type === 'resolved'
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : notification.type === 'assigned'
+                            ? 'bg-blue-100 text-blue-700'
+                            : 'bg-amber-100 text-amber-700'
+                        }`}>
+                          <BellRing className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-start justify-between gap-2">
+                            <p className="text-xs font-bold text-slate-900">{notification.title || 'Complaint Update'}</p>
+                            {!notification.read && (
+                              <span className="w-2 h-2 rounded-full bg-emerald-600 mt-1 flex-shrink-0" />
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+                            {notification.message || 'Your complaint has been updated.'}
+                          </p>
+                          {notification.complaintId && (
+                            <p className="text-[10px] font-mono text-emerald-700 mt-1">
+                              Complaint: {notification.complaintId}
+                            </p>
+                          )}
+                          <p className="text-[9px] text-slate-400 mt-1">
+                            {formatNotificationTime(notification.createdAt)}
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
