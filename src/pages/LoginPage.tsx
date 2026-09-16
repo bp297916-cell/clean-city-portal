@@ -172,12 +172,12 @@ export const LoginPage: React.FC = () => {
           {/* Quick Demo Login Bar */}
           <div className="p-3 bg-emerald-50 rounded-2xl border border-emerald-200/80 space-y-2">
             <span className="text-[11px] font-bold text-emerald-900 uppercase tracking-wider block text-center">
-              Quick One-Click Demo Access
+              Login As
             </span>
 
             <div className="grid grid-cols-2 gap-2">
 
-              {/* Citizen Demo */}
+              {/* Citizen */}
               <button
                 id="quick-login-citizen-btn"
                 type="button"
@@ -185,10 +185,10 @@ export const LoginPage: React.FC = () => {
                 className="py-2 px-2.5 bg-white hover:bg-emerald-100 text-emerald-800 text-xs font-bold rounded-xl border border-emerald-300 shadow-2xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <UserCheck className="w-3.5 h-3.5" />
-                <span>Citizen Demo</span>
+                <span>Citizen</span>
               </button>
 
-              {/* Admin Demo */}
+              {/* Admin */}
               <button
                 id="quick-login-admin-btn"
                 type="button"
@@ -196,7 +196,7 @@ export const LoginPage: React.FC = () => {
                 className="py-2 px-2.5 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-xl shadow-2xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-200" />
-                <span>Admin Demo</span>
+                <span>Admin</span>
               </button>
 
             </div>
